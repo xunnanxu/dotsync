@@ -67,7 +67,10 @@ pub fn run() -> Result<()> {
 
     cfg.save()?;
 
-    let committed = git::git_commit_all(&repo_dir, "dotsync: sync")?;
+    let committed = git::git_commit_all(
+        &repo_dir,
+        &format!("dotsync: sync {}", Utc::now().format("%Y-%m-%d %H:%M:%S")),
+    )?;
 
     if git::has_remote(&repo_dir) && committed {
         println!("Pushing to remote...");
