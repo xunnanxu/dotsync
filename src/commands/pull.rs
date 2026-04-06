@@ -21,6 +21,14 @@ pub fn run(args: PullArgs) -> Result<()> {
     // Guard ensures `git worktree remove` runs even on error.
     let wt = WorktreeGuard::add(&repo_dir, &args.commit)?;
 
+    // Restore the config file first so it reflects the state of that commit.
+    let config_src = wt.path().join(".dotsync.yaml");
+    if config_src.exists() {
+        fs::copy(&config_src, &config::config_path())
+            .context("failed to restore .dotsync.yaml from commit")?;
+        println!("  [restored] .dotsync.yaml");
+    }
+
     for file in &cfg.files {
         let src  = wt.path().join(file);
         let dest = config::home_dir().join(file);

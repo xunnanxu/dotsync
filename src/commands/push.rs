@@ -34,6 +34,8 @@ pub fn run() -> Result<()> {
     }
 
     cfg.save()?;
+    std::fs::copy(&config::config_path(), &config::repo_config_path())
+        .context("failed to copy .dotsync.yaml into repo")?;
 
     let committed = git::git_commit_all(&repo_dir, "dotsync: push")?;
     if git::has_remote(&repo_dir) && committed {

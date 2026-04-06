@@ -12,12 +12,9 @@ pub struct InitArgs {
 }
 
 pub fn run(args: InitArgs) -> Result<()> {
-    let dotsync_dir = config::dotsync_dir();
-    std::fs::create_dir_all(&dotsync_dir)
-        .with_context(|| format!("failed to create {}", dotsync_dir.display()))?;
-
     let repo_dir = config::repo_dir();
-    if repo_dir.exists() {
+
+    if repo_dir.exists() && repo_dir.join(".git").exists() {
         println!("Tracking repo already exists at {}", repo_dir.display());
     } else if let Some(url) = args.repo {
         println!("Cloning {} ...", url);

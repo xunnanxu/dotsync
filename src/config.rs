@@ -7,16 +7,19 @@ pub fn home_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME environment variable not set"))
 }
 
-pub fn dotsync_dir() -> PathBuf {
+/// The git tracking repo: ~/.dotsync/
+pub fn repo_dir() -> PathBuf {
     home_dir().join(".dotsync")
 }
 
+/// The live config file: ~/.dotsync.yaml
 pub fn config_path() -> PathBuf {
-    dotsync_dir().join(".config.yaml")
+    home_dir().join(".dotsync.yaml")
 }
 
-pub fn repo_dir() -> PathBuf {
-    dotsync_dir().join("repo")
+/// The config file's copy inside the repo: ~/.dotsync/.dotsync.yaml
+pub fn repo_config_path() -> PathBuf {
+    repo_dir().join(".dotsync.yaml")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
