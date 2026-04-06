@@ -12,6 +12,43 @@ Rust-based dotfile syncing.
 
 Linux, MacOS
 
+## Installation
+
+```shell
+$ cargo install --path .
+$ dotsync help
+```
+
+## Commands
+
+* `init [--repo <repo url>]`
+    - sets up the tracking repo in `~/.dotsync`; if `--repo` is not provided, creates a local-only git repo.
+* `sync`
+    - pulls from remote, applies per-file sync strategy, then commits and pushes.
+    - commit message includes the timestamp: `dotsync: sync YYYY-MM-DD HH:MM:SS`.
+* `pull --commit <commit>`
+    - checks out the given commit into a temporary worktree and applies the tracked files to local disk.
+    - `last_synced` timestamps are ignored; local files are overwritten unconditionally.
+    - does not alter repo history.
+* `push`
+    - overwrites remote files with local files and updates all `last_synced` timestamps.
+* `config add <file> [--strategy overwrite|merge] [-v]`
+    - adds a file to the tracked list; accepts absolute paths (`~/.tmux.conf`), home-relative paths (`.tmux.conf`), or nested paths (`.config/nvim/init.vim`).
+    - `--strategy merge` populates a metadata entry so the file uses union-merge instead of overwrite.
+    - `-v` prints the full tracked file list after the operation.
+* `config remove <file> [-v]`
+    - removes a file from the tracked list and clears its metadata entry.
+    - `-v` prints the full tracked file list after the operation.
+* `config list`
+    - shows the current repo path, remote URL, and branch, followed by all tracked files with their strategy and last-synced timestamp.
+* `config --auto-sync-interval <interval>`
+    - installs a user crontab entry that runs `sync` automatically on the given interval.
+    - interval is semi-natural: `30m`, `1h`, `6h`, `1d`, `"30 minutes"`, `"2 hours"`, etc.
+    - minute intervals must evenly divide 60 (e.g. 5, 10, 15, 20, 30).
+    - hour intervals must evenly divide 24 (e.g. 1, 2, 3, 4, 6, 8, 12).
+* `config --disable-auto-sync`
+    - removes the auto-sync crontab entry.
+
 ## How It Works
 
 It requires an existing/empty git repository to begin with. All changes will be synced there.
@@ -45,21 +82,3 @@ one can update the strategy to `merge`, in which case dotsync would try to combi
 The order could be arbitrary and dotsync would not try to maintain chronological order,
 similar to git `merge=union`.
 
-## Commands
-
-* `init [--repo <repo url>]`
-    - this setups the tracking repo in `~/.dotsync`, if `--repo` is not provided it would create a new one.
-* `sync`
-    - syncs all files to the tracking repo and pushes the changes.
-* `pull --commit <commit>`
-    - picks the specific commit from the repo and applies changes to the local files.
-    - in this mode, the `last_synced` timestamps are ignored and local files will be overwritten by remote ones.
-* `push`
-    - overwrites remote files with local files with all timestamps updated to local last modified time.
-* `config --auto-sync-interval <interval>`
-    - installs a user crontab entry that runs `sync` automatically on the given interval.
-    - interval is semi-natural: `30m`, `1h`, `6h`, `1d`, `"30 minutes"`, `"2 hours"`, etc.
-    - minute intervals must evenly divide 60 (e.g. 5, 10, 15, 20, 30).
-    - hour intervals must evenly divide 24 (e.g. 1, 2, 3, 4, 6, 8, 12).
-* `config --disable-auto-sync`
-    - removes the auto-sync crontab entry.
