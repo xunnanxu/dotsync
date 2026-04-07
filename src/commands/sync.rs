@@ -201,11 +201,17 @@ fn copy_down(repo: &Path, local: &Path, file: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a file as UTF-8, replacing any invalid bytes with the Unicode
+/// replacement character so that line-based merging never fails.
+fn read_lossy(path: &Path, label: &str) -> Result<String> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read {} {}", label, path.display()))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn merge_both(file: &str, local: &Path, repo: &Path) -> Result<()> {
-    let local_content = fs::read_to_string(local)
-        .with_context(|| format!("failed to read local {}", file))?;
-    let repo_content = fs::read_to_string(repo)
-        .with_context(|| format!("failed to read repo {}", file))?;
+    let local_content = read_lossy(local, "local")?;
+    let repo_content = read_lossy(repo, "repo")?;
 
     let result = merge_union(&local_content, &repo_content);
 
@@ -261,6 +267,36 @@ mod tests {
     fn merge_deduplicates_identical_lines() {
         let result = merge_union("x\ny\n", "x\ny\n");
         assert_eq!(result, "x\ny\n");
+    }
+
+    #[test]
+    fn merge_handles_non_utf8_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let local = tmp.path().join("history");
+        let repo  = tmp.path().join("repo/history");
+        assert_isolated(&[&local, &repo]);
+
+        // Local has an invalid byte sequence mixed into a valid line
+        let local_bytes = b"line_a\ngit reset --hard \xe2\x80\x83\xb4\nline_b\n";
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        fs::write(&local, &local_bytes).unwrap();
+
+        // Repo has clean UTF-8 with an overlapping and a unique line
+        write(&repo, "line_a\nline_c\n");
+
+        merge_both(".history", &local, &repo).unwrap();
+
+        let merged = fs::read_to_string(&local).unwrap();
+        // line_a appears once (deduped), the lossy-cleaned line is kept, line_b and line_c present
+        assert!(merged.contains("line_a"), "shared line should be present");
+        assert!(merged.contains("line_b"), "local-only line should be present");
+        assert!(merged.contains("line_c"), "remote-only line should be present");
+        assert!(merged.contains("git reset"), "cleaned line should be present");
+        // The invalid bytes should have been replaced — result must be valid UTF-8
+        assert!(merged.is_ascii() || merged.contains('\u{FFFD}'),
+            "invalid bytes should be replaced with U+FFFD");
+        // Repo copy should match local
+        assert_eq!(fs::read_to_string(&repo).unwrap(), merged);
     }
 
     #[test]
