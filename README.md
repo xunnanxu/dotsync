@@ -82,3 +82,6 @@ one can update the strategy to `merge`, in which case dotsync would try to combi
 The order could be arbitrary and dotsync would not try to maintain chronological order,
 similar to git `merge=union`.
 
+Lines ending in a backslash are kept together with their continuation lines
+as one entry. Merging removes duplicate entries while preserving their embedded
+newlines and keeping distinct multi-line commands intact.

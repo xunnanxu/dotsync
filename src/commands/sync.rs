@@ -105,14 +105,33 @@ fn should_upload(local_mtime: DateTime<Utc>, last_synced: Option<DateTime<Utc>>)
     }
 }
 
-/// Produce a union of lines: all local lines first, then any remote-only lines.
-/// Duplicate lines are dropped (first occurrence wins).
+/// Group backslash-continued physical lines into a single logical entry.
+/// Keep the backslashes and embedded newlines so history remains replayable.
+fn logical_entries(text: &str) -> impl Iterator<Item = String> + '_ {
+    let mut lines = text.lines();
+    std::iter::from_fn(move || {
+        let mut line = lines.next()?;
+        let mut entry = line.to_owned();
+        while line.ends_with('\\') {
+            let Some(next) = lines.next() else {
+                break;
+            };
+            entry.push('\n');
+            entry.push_str(next);
+            line = next;
+        }
+        Some(entry)
+    })
+}
+
+/// Produce a union of entries: all local entries first, then remote-only entries.
+/// Duplicate entries are dropped (first occurrence wins).
 fn merge_union(local_text: &str, remote_text: &str) -> String {
     let mut seen = HashSet::new();
-    let mut merged: Vec<&str> = Vec::new();
-    for line in local_text.lines().chain(remote_text.lines()) {
-        if seen.insert(line) {
-            merged.push(line);
+    let mut merged = Vec::new();
+    for entry in logical_entries(local_text).chain(logical_entries(remote_text)) {
+        if seen.insert(entry.clone()) {
+            merged.push(entry);
         }
     }
     merged.join("\n") + "\n"
@@ -267,6 +286,62 @@ mod tests {
     fn merge_deduplicates_identical_lines() {
         let result = merge_union("x\ny\n", "x\ny\n");
         assert_eq!(result, "x\ny\n");
+    }
+
+    #[test]
+    fn merge_preserves_multiline_entries_with_shared_lines() {
+        let local = "echo done\ncurl \\\n  local \\\n  --verbose\necho done\n";
+        let remote = "curl \\\n  remote \\\n  --verbose\necho \\\necho done\n";
+        let expected = "echo done\ncurl \\\n  local \\\n  --verbose\ncurl \\\n  remote \\\n  --verbose\necho \\\necho done\n";
+
+        assert_eq!(merge_union(local, remote), expected);
+        assert_eq!(merge_union(expected, remote), expected);
+    }
+
+    #[test]
+    fn merge_deduplicates_whole_multiline_entries() {
+        let entry = "echo \\\n  hello \\\n  world\n";
+        let local = format!("{entry}{entry}local\n");
+        let remote = format!("{entry}remote\n{entry}");
+
+        assert_eq!(merge_union(&local, &remote), format!("{entry}local\nremote\n"));
+    }
+
+    #[test]
+    fn merge_preserves_blank_lines_inside_entries() {
+        let local = "\necho \\\n\nlocal\n";
+        let remote = "echo \\\n\nremote\n";
+
+        assert_eq!(merge_union(local, remote), "\necho \\\n\nlocal\nremote\n");
+    }
+
+    #[test]
+    fn merge_handles_multiline_entries_with_crlf_and_no_final_newline() {
+        let local = "echo \\\r\n  hello\r\n";
+        let remote = "echo \\\n  hello\necho \\\n  world";
+
+        assert_eq!(merge_union(local, remote), "echo \\\n  hello\necho \\\n  world\n");
+    }
+
+    #[test]
+    fn merge_keeps_unfinished_continuation_at_eof() {
+        assert_eq!(merge_union("", "echo \\\n  hello \\"), "echo \\\n  hello \\\n");
+    }
+
+    #[test]
+    fn merge_both_writes_complete_multiline_entries() {
+        let tmp = TempDir::new().unwrap();
+        let local = tmp.path().join("history");
+        let repo = tmp.path().join("repo/history");
+        assert_isolated(&[&local, &repo]);
+        write(&local, "echo \\\n  local\n");
+        write(&repo, "echo \\\n  remote\n");
+
+        merge_both(".history", &local, &repo).unwrap();
+
+        let expected = "echo \\\n  local\necho \\\n  remote\n";
+        assert_eq!(fs::read_to_string(&local).unwrap(), expected);
+        assert_eq!(fs::read_to_string(&repo).unwrap(), expected);
     }
 
     #[test]
