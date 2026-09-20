@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use clap::Args;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -9,9 +10,27 @@ use crate::git;
 
 const CONFIG_FILE: &str = ".dotsync.yaml";
 
-pub fn run() -> Result<()> {
+#[derive(Args)]
+pub struct SyncArgs {
+    /// Preview sync directions without changing files, committing, or pushing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub fn run(args: SyncArgs) -> Result<()> {
     let repo_dir = config::repo_dir();
     let mut cfg = DotsyncConfig::load()?;
+
+    if args.dry_run {
+        println!("Preparing dry run...");
+        let preview_repo = git::SyncPreviewRepo::prepare(&repo_dir)?;
+        let repo = preview_repo.as_ref().map_or(repo_dir.as_path(), |r| r.path());
+        for (file, action) in preview_at(&config::home_dir(), repo, cfg)? {
+            println!("  [{}] {}", action.label(), file);
+        }
+        println!("Dry run complete. No files changed, commits created, or pushes performed.");
+        return Ok(());
+    }
 
     if git::has_remote(&repo_dir) {
         println!("Pulling from remote...");
@@ -31,43 +50,24 @@ pub fn run() -> Result<()> {
         let local = config::home_dir().join(file);
         let repo  = repo_dir.join(file);
 
-        match (local.exists(), repo.exists()) {
-            (false, false) => {
+        let action = plan_file(&local, &repo, cfg.strategy_for(file), cfg.last_synced_for(file))?;
+        match action {
+            SyncAction::Missing => {
                 println!("  [skip]     {} — not found locally or in repo", file);
             }
-            (true, false) => {
+            SyncAction::OverwriteRemote => {
                 copy_up(&local, &repo, file)?;
-                cfg.set_last_synced(file, mtime(&local)?);
             }
-            (false, true) => {
+            SyncAction::OverwriteLocal => {
                 copy_down(&repo, &local, file)?;
-                cfg.set_last_synced(file, mtime(&local)?);
             }
-            (true, true) => {
-                let strategy    = cfg.strategy_for(file);
-                let last_synced = cfg.last_synced_for(file);
-
-                match strategy {
-                    SyncStrategy::Merge => {
-                        if files_identical(&local, &repo) {
-                            print_skipped(file);
-                        } else {
-                            merge_both(file, &local, &repo)?;
-                        }
-                        cfg.set_last_synced(file, mtime(&local)?);
-                    }
-                    SyncStrategy::Overwrite => {
-                        if files_identical(&local, &repo) {
-                            print_skipped(file);
-                        } else if should_upload(mtime(&local)?, last_synced) {
-                            copy_up(&local, &repo, file)?;
-                        } else {
-                            copy_down(&repo, &local, file)?;
-                        }
-                        cfg.set_last_synced(file, mtime(&local)?);
-                    }
-                }
+            SyncAction::Merge => {
+                merge_both(file, &local, &repo)?;
             }
+            SyncAction::Skip => print_skipped(file),
+        }
+        if action != SyncAction::Missing {
+            cfg.set_last_synced(file, mtime(&local)?);
         }
     }
 
@@ -94,6 +94,75 @@ pub fn run() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Extracted logic (also used by tests)
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncAction {
+    OverwriteRemote,
+    OverwriteLocal,
+    Merge,
+    Skip,
+    Missing,
+}
+
+impl SyncAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OverwriteRemote => "overwrite_remote",
+            Self::OverwriteLocal => "overwrite_local",
+            Self::Merge => "merge",
+            Self::Skip => "skip_identical",
+            Self::Missing => "skip_missing",
+        }
+    }
+}
+
+fn plan_file(
+    local: &Path,
+    repo: &Path,
+    strategy: SyncStrategy,
+    last_synced: Option<DateTime<Utc>>,
+) -> Result<SyncAction> {
+    Ok(match (local.exists(), repo.exists()) {
+        (false, false) => SyncAction::Missing,
+        (true, false) => SyncAction::OverwriteRemote,
+        (false, true) => SyncAction::OverwriteLocal,
+        (true, true) if files_identical(local, repo) => SyncAction::Skip,
+        (true, true) => match strategy {
+            SyncStrategy::Merge => SyncAction::Merge,
+            SyncStrategy::Overwrite if should_upload(mtime(local)?, last_synced) => {
+                SyncAction::OverwriteRemote
+            }
+            SyncStrategy::Overwrite => SyncAction::OverwriteLocal,
+        },
+    })
+}
+
+/// Follow the config decision in memory before planning tracked files.
+fn preview_at(home: &Path, repo: &Path, mut cfg: DotsyncConfig) -> Result<Vec<(String, SyncAction)>> {
+    let repo_config = repo.join(CONFIG_FILE);
+    let action = plan_file(
+        &home.join(CONFIG_FILE),
+        &repo_config,
+        SyncStrategy::Overwrite,
+        cfg.last_synced_for(CONFIG_FILE),
+    )?;
+    if action == SyncAction::OverwriteLocal {
+        cfg = serde_yaml::from_str(&fs::read_to_string(&repo_config)?)
+            .context("failed to parse repo config for dry run")?;
+    }
+
+    let mut plan = vec![(CONFIG_FILE.to_owned(), action)];
+    for file in &cfg.files {
+        let action = plan_file(
+            &home.join(file),
+            &repo.join(file),
+            cfg.strategy_for(file),
+            cfg.last_synced_for(file),
+        )?;
+        plan.push((file.clone(), action));
+    }
+    Ok(plan)
+}
 
 /// Returns true when the local file should overwrite an existing repo file.
 /// Upload only when the local file was modified after a recorded sync.
@@ -140,32 +209,18 @@ fn merge_union(local_text: &str, remote_text: &str) -> String {
 /// Sync `local` ↔ `repo` for the config file using overwrite strategy.
 /// Returns true if `local` was overwritten from `repo` (caller should reload config).
 fn sync_config_file_at(local: &Path, repo: &Path, cfg: &mut DotsyncConfig) -> Result<bool> {
-    match (local.exists(), repo.exists()) {
-        (false, false) => Ok(false),
-        (true, false) => {
+    match plan_file(local, repo, SyncStrategy::Overwrite, cfg.last_synced_for(CONFIG_FILE))? {
+        SyncAction::OverwriteRemote => {
             copy_up(local, repo, CONFIG_FILE)?;
             cfg.set_last_synced(CONFIG_FILE, mtime(local)?);
             Ok(false)
         }
-        (false, true) => {
+        SyncAction::OverwriteLocal => {
             copy_down(repo, local, CONFIG_FILE)?;
             Ok(true)
         }
-        (true, true) => {
-            if files_identical(local, repo) {
-                Ok(false)
-            } else {
-                let last_synced = cfg.last_synced_for(CONFIG_FILE);
-                if should_upload(mtime(local)?, last_synced) {
-                    copy_up(local, repo, CONFIG_FILE)?;
-                    cfg.set_last_synced(CONFIG_FILE, mtime(local)?);
-                    Ok(false)
-                } else {
-                    copy_down(repo, local, CONFIG_FILE)?;
-                    Ok(true)
-                }
-            }
-        }
+        SyncAction::Skip | SyncAction::Missing => Ok(false),
+        SyncAction::Merge => unreachable!("config always uses overwrite strategy"),
     }
 }
 
@@ -387,6 +442,83 @@ mod tests {
     }
 
     // --- overwrite direction ---
+
+    #[test]
+    fn plan_covers_directions_without_changing_files() {
+        let cases = [
+            (None, None, SyncStrategy::Overwrite, None, SyncAction::Missing),
+            (Some("local"), None, SyncStrategy::Overwrite, None, SyncAction::OverwriteRemote),
+            (None, Some("remote"), SyncStrategy::Overwrite, None, SyncAction::OverwriteLocal),
+            (Some("same"), Some("same"), SyncStrategy::Overwrite, None, SyncAction::Skip),
+            (Some("same"), Some("same"), SyncStrategy::Merge, None, SyncAction::Skip),
+            (Some("local"), Some("remote"), SyncStrategy::Overwrite, None, SyncAction::OverwriteLocal),
+            (Some("local"), Some("remote"), SyncStrategy::Overwrite, Some(Utc::now() - Duration::days(1)), SyncAction::OverwriteRemote),
+            (Some("local"), Some("remote"), SyncStrategy::Overwrite, Some(Utc::now() + Duration::days(1)), SyncAction::OverwriteLocal),
+            (Some("local"), Some("remote"), SyncStrategy::Merge, None, SyncAction::Merge),
+        ];
+        for (local_content, repo_content, strategy, last_synced, expected) in cases {
+            let tmp = TempDir::new().unwrap();
+            let local = tmp.path().join("local");
+            let repo = tmp.path().join("repo");
+            if let Some(content) = local_content {
+                write(&local, content);
+            }
+            if let Some(content) = repo_content {
+                write(&repo, content);
+            }
+            let before = [mtime(&local).ok(), mtime(&repo).ok()];
+            assert_eq!(plan_file(&local, &repo, strategy, last_synced).unwrap(), expected);
+            assert_eq!(fs::read_to_string(&local).ok().as_deref(), local_content);
+            assert_eq!(fs::read_to_string(&repo).ok().as_deref(), repo_content);
+            assert_eq!([mtime(&local).ok(), mtime(&repo).ok()], before);
+        }
+    }
+
+    #[test]
+    fn preview_uses_downloaded_config_without_writing_it() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let repo = tmp.path().join("repo");
+        let local_config = "files:\n- old-file\n";
+        let remote_config = "files:\n- new-history\nmetadata:\n- file: new-history\n  strategy: merge\n";
+        write(&home.join(CONFIG_FILE), local_config);
+        write(&repo.join(CONFIG_FILE), remote_config);
+        write(&home.join("new-history"), "local\n");
+        write(&repo.join("new-history"), "remote\n");
+        let before = mtime(&home.join(CONFIG_FILE)).unwrap();
+        let cfg = serde_yaml::from_str(local_config).unwrap();
+
+        let plan = preview_at(&home, &repo, cfg).unwrap();
+
+        assert_eq!(plan, vec![
+            (CONFIG_FILE.to_owned(), SyncAction::OverwriteLocal),
+            ("new-history".to_owned(), SyncAction::Merge),
+        ]);
+        assert_eq!(fs::read_to_string(home.join(CONFIG_FILE)).unwrap(), local_config);
+        assert_eq!(fs::read_to_string(repo.join(CONFIG_FILE)).unwrap(), remote_config);
+        assert_eq!(mtime(&home.join(CONFIG_FILE)).unwrap(), before);
+        assert_eq!(fs::read_to_string(home.join("new-history")).unwrap(), "local\n");
+        assert_eq!(fs::read_to_string(repo.join("new-history")).unwrap(), "remote\n");
+    }
+
+    #[test]
+    fn preview_keeps_locally_modified_config() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let repo = tmp.path().join("repo");
+        let mut cfg = DotsyncConfig::default();
+        cfg.files.push("local-only".to_owned());
+        cfg.set_last_synced(CONFIG_FILE, Utc::now() - Duration::days(1));
+        write(&home.join(CONFIG_FILE), &serde_yaml::to_string(&cfg).unwrap());
+        write(&repo.join(CONFIG_FILE), "files:\n- remote-only\n");
+        write(&home.join("local-only"), "local\n");
+
+        assert_eq!(preview_at(&home, &repo, cfg).unwrap(), vec![
+            (CONFIG_FILE.to_owned(), SyncAction::OverwriteRemote),
+            ("local-only".to_owned(), SyncAction::OverwriteRemote),
+        ]);
+        assert!(!repo.join("local-only").exists());
+    }
 
     #[test]
     fn sync_uploads_when_local_is_newer_than_last_synced() {
