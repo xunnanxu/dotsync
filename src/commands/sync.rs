@@ -95,12 +95,12 @@ pub fn run() -> Result<()> {
 // Extracted logic (also used by tests)
 // ---------------------------------------------------------------------------
 
-/// Returns true when the local file should be uploaded to the repo.
-/// Local is considered newer when it was modified after the last sync,
-/// or when there is no sync record yet (first sync).
+/// Returns true when the local file should overwrite an existing repo file.
+/// Upload only when the local file was modified after a recorded sync.
+/// Without a sync record, prefer the existing repo copy on first sync.
 fn should_upload(local_mtime: DateTime<Utc>, last_synced: Option<DateTime<Utc>>) -> bool {
     match last_synced {
-        None     => true,
+        None     => false,
         Some(ts) => local_mtime > ts,
     }
 }
@@ -401,8 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_uploads_on_first_sync_with_no_history() {
-        assert!(should_upload(Utc::now(), None));
+    fn sync_downloads_on_first_sync_with_no_history() {
+        assert!(!should_upload(Utc::now(), None));
+        assert!(!should_upload(Utc::now() + Duration::days(1), None));
     }
 
     // --- skipped (identical content) ---
@@ -453,6 +454,23 @@ mod tests {
     }
 
     // --- config file sync ---
+
+    #[test]
+    fn sync_config_downloads_existing_repo_copy_without_sync_record() {
+        let tmp = TempDir::new().unwrap();
+        let local = tmp.path().join(".dotsync.yaml");
+        let repo = tmp.path().join("repo/.dotsync.yaml");
+        assert_isolated(&[&local, &repo]);
+        write(&repo, "files:\n- .claude/settings.json\n");
+        write(&local, "files: []\n");
+
+        let mut cfg = DotsyncConfig::default();
+        let downloaded = sync_config_file_at(&local, &repo, &mut cfg).unwrap();
+
+        assert!(downloaded, "first sync should use the existing repo copy");
+        assert_eq!(fs::read_to_string(&local).unwrap(), "files:\n- .claude/settings.json\n");
+        assert_eq!(fs::read_to_string(&repo).unwrap(), "files:\n- .claude/settings.json\n");
+    }
 
     #[test]
     fn sync_config_uploads_when_repo_is_absent() {

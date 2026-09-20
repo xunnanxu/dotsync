@@ -74,8 +74,12 @@ The default sync strategy if not specified is `overwrite`,
 meaning if the last modified timestamp of the local file is older than the `last_synced` timestamp,
 then the local file will simply be overwitten by the remote file.
 
-If the file was never synced, then the local file will be uploaded to remote repo,
-and the `last_synced` timestamp will be updated to the last modified time of the local file.
+For the `overwrite` strategy, if the file has no local `last_synced` record and
+already exists in the remote repo, the remote copy overwrites the local file.
+If the remote repo does not have the file, the local copy is uploaded instead.
+After syncing, `last_synced` is updated to the local file's modification time.
+Timestamps stored inside a file (such as a JSON `lastModifiedTimestamp` field)
+are not used to decide the sync direction.
 
 In the case where this is not sufficient like the history files,
 one can update the strategy to `merge`, in which case dotsync would try to combine the changes.
