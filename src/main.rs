@@ -19,7 +19,7 @@ enum Commands {
     /// Initialize the tracking repository
     Init(init::InitArgs),
     /// Bidirectional sync: pull, apply per-file strategy, push
-    Sync,
+    Sync(sync::SyncArgs),
     /// Push all local files to the tracking repo (overwrite remote)
     Push,
     /// Restore files from a specific commit without altering repo history
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init(args)   => init::run(args),
-        Commands::Sync         => sync::run(),
+        Commands::Sync(args)   => sync::run(args),
         Commands::Push         => push::run(),
         Commands::Pull(args)   => pull::run(args),
         Commands::Config(args) => config_cmd::run(args),

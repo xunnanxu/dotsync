@@ -26,6 +26,16 @@ $ dotsync help
 * `sync`
     - pulls from remote, applies per-file sync strategy, then commits and pushes.
     - commit message includes the timestamp: `dotsync: sync YYYY-MM-DD HH:MM:SS`.
+* `sync --dry-run`
+    - previews the config and tracked-file sync directions without changing home files,
+      the tracking repository, or the remote.
+    - reports `overwrite_remote` (upload), `overwrite_local` (download), or `merge`;
+      identical files report `skip_identical` and absent files report `skip_missing`.
+    - fetches and rebases in a temporary clone to preview the latest remote state,
+      including local commits. Requires network access when a remote pull is needed.
+    - follows a downloaded config in memory so the preview uses its tracked files and strategies.
+    - reports pull conflicts as errors. If a pull is needed, the tracking repository must
+      be clean; commit or stash its pending changes before previewing.
 * `pull --commit <commit>`
     - checks out the given commit into a temporary worktree and applies the tracked files to local disk.
     - `last_synced` timestamps are ignored; local files are overwritten unconditionally.
